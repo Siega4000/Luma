@@ -1,0 +1,147 @@
+name: Сборка Luma
+
+# Запускается при отправке изменений в main и по кнопке «Run workflow».
+# Если отправить тег вида v1.0.1 — дополнительно создаётся Release
+# с готовым архивом и исходниками ffmpeg (требование GPL).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Забрать код
+        uses: actions/checkout@v4
+
+      - name: Поставить Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Установить зависимости
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Скачать ffmpeg и зафиксировать версию
+        run: |
+          curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip
+          tar -xf ffmpeg.zip
+          $exe = Get-ChildItem -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          Copy-Item $exe.FullName -Destination ffmpeg.exe -Force
+
+          # Точная версия нужна, чтобы приложить исходники именно её (GPL)
+          $banner = (& .\ffmpeg.exe -version) -join "`n"
+          $version = ($banner -split "`n")[0] -replace '^ffmpeg version ([^\s-]+).*$', '$1'
+          "FFMPEG_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          @(
+            "Сборка ffmpeg, включённая в этот релиз Luma",
+            "",
+            "Версия: $version",
+            "Источник сборки: https://www.gyan.dev/ffmpeg/builds/ (release essentials)",
+            "Сборочные скрипты: https://github.com/GyanD/codexffmpeg",
+            "Исходный код этой версии: https://ffmpeg.org/releases/ffmpeg-$version.tar.xz",
+            "",
+            "Полный вывод ffmpeg -version:",
+            $banner
+          ) | Out-File -FilePath FFMPEG-BUILD.txt -Encoding utf8
+          Write-Host "ffmpeg version: $version"
+        shell: pwsh
+
+      - name: Скачать исходники ffmpeg той же версии
+        run: |
+          $url = "https://ffmpeg.org/releases/ffmpeg-$env:FFMPEG_VERSION.tar.xz"
+          Write-Host "Исходники: $url"
+          try {
+            curl.exe -fL -o "ffmpeg-$env:FFMPEG_VERSION-source.tar.xz" $url
+            Write-Host "Исходники получены."
+          } catch {
+            Write-Warning "Не удалось скачать исходники по прямой ссылке."
+            Write-Warning "Релиз будет собран, но приложите исходники вручную — этого требует GPL."
+          }
+        shell: pwsh
+
+      - name: Собрать exe
+        run: >
+          pyinstaller --noconsole --onefile --name Luma
+          --icon=luma.ico --version-file version_info.txt
+          --add-data "luma.ico;." main.py
+
+      - name: Собрать портативный комплект
+        run: |
+          New-Item -ItemType Directory -Force -Path Luma-Portable | Out-Null
+          Copy-Item dist\Luma.exe Luma-Portable\
+          Copy-Item ffmpeg.exe Luma-Portable\
+          Copy-Item LICENSE Luma-Portable\
+          Copy-Item THIRD-PARTY-LICENSES.md Luma-Portable\
+          Copy-Item FFMPEG-BUILD.txt Luma-Portable\
+          Copy-Item licenses Luma-Portable\licenses -Recurse
+          $readme = @(
+            "Luma - загрузка треков с YouTube, SoundCloud и Bandcamp",
+            "",
+            "Установка не нужна: запустите Luma.exe из этой папки.",
+            "Файлы Luma.exe и ffmpeg.exe должны лежать вместе.",
+            "",
+            "При первом запуске Windows может показать предупреждение",
+            "'неизвестный издатель' - нажмите 'Подробнее', затем",
+            "'Выполнить в любом случае'.",
+            "",
+            "Лицензии: файл LICENSE (сама Luma) и папка licenses",
+            "(ffmpeg, PySide6, mutagen). ffmpeg - отдельная программа",
+            "под лицензией GPL v3, см. licenses/FFMPEG-NOTICE.md."
+          )
+          $readme | Out-File -FilePath "Luma-Portable\ПРОЧТИ МЕНЯ.txt" -Encoding utf8
+          Compress-Archive -Path Luma-Portable\* -DestinationPath Luma-Portable.zip -Force
+        shell: pwsh
+
+      - name: Выложить архив
+        uses: actions/upload-artifact@v4
+        with:
+          name: Luma-Portable
+          path: |
+            Luma-Portable.zip
+            ffmpeg-*-source.tar.xz
+          retention-days: 30
+
+      # ---------------------------------------------------------------
+      # ПОДПИСЬ КОДА (SignPath Foundation)
+      #
+      # Подключается ПОСЛЕ одобрения заявки: фонд выдаёт идентификатор
+      # организации, slug проекта и политики подписи, а токен кладётся
+      # в Settings → Secrets and variables → Actions как
+      # SIGNPATH_API_TOKEN.
+      #
+      # Схема работы: собранный exe выкладывается артефактом, действие
+      # SignPath отправляет его на подпись и скачивает подписанный файл
+      # обратно, после чего собирается портативный архив.
+      # Точные параметры — в документации:
+      # https://about.signpath.io/documentation/trusted-build-systems/github-actions
+      #
+      # - name: Подписать сборку
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: "<выдаст SignPath>"
+      #     project-slug: "luma"
+      #     signing-policy-slug: "release-signing"
+      #     github-artifact-id: "${{ steps.upload.outputs.artifact-id }}"
+      #     wait-for-completion: true
+      #     output-artifact-directory: "signed"
+      # ---------------------------------------------------------------
+
+      - name: Создать релиз (только для тегов)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Исходники ffmpeg прикладываются к релизу вместе с программой:
+          # так выполняется требование GPL о доступности исходного кода.
+          files: |
+            Luma-Portable.zip
+            ffmpeg-*-source.tar.xz
+          generate_release_notes: true

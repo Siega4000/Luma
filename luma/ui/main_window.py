@@ -308,12 +308,33 @@ class MainWindow(FramelessMixin, QMainWindow):
     # ------------------------------------------------------------ действия
 
     def _autogrow_input(self) -> None:
-        """Поле растёт под число строк, но не выше заданного предела."""
-        line_height = self.url_input.fontMetrics().lineSpacing()
-        lines = max(1, self.url_input.document().blockCount())
-        inner = max(line_height + 4, min(lines * line_height + 6, SIZE["input_max"] - 20))
-        self.url_input.setFixedHeight(int(inner))
-        self.input_shell.setFixedHeight(int(inner) + 20)
+        """
+        Поле растёт под текст, но не выше заданного предела.
+
+        Считаются строки после переноса, а не по нажатию Enter:
+        длинная ссылка (SoundCloud с хвостом ?si=…&utm_…) занимает
+        несколько строк, и при высоте в одну строку поле прокручивалось
+        к её концу — начало ссылки пропадало из вида.
+        """
+        editor = self.url_input
+        doc = editor.document()
+        layout = doc.documentLayout()
+        content = 0.0
+        block = doc.begin()
+        while block.isValid():
+            content += layout.blockBoundingRect(block).height()
+            block = block.next()
+        content += doc.documentMargin() * 2
+
+        line_height = editor.fontMetrics().lineSpacing()
+        limit = SIZE["input_max"] - 20
+        inner = int(max(line_height + 4, min(content, limit)))
+        if editor.height() != inner:
+            editor.setFixedHeight(inner)
+            self.input_shell.setFixedHeight(inner + 20)
+        if content <= limit:
+            # Всё помещается — показываем текст с начала
+            editor.verticalScrollBar().setValue(0)
 
     def _detect_platforms(self, text: str) -> set[str]:
         found = set()
@@ -338,6 +359,10 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def eventFilter(self, obj, event):  # noqa: N802 (интерфейс Qt)
         """Рамка поля подсвечивается, когда фокус внутри него."""
+        if obj is self.url_input and event.type() == event.Type.Resize:
+            # Ширина поля изменилась — перенос строк пересчитан, высота тоже
+            if event.size().width() != event.oldSize().width():
+                QTimer.singleShot(0, self._autogrow_input)
         if obj is self.url_input and self.input_shell.property("state") != "error":
             if event.type() == event.Type.FocusIn:
                 self._set_input_state("focus")

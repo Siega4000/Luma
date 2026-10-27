@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Luma"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 def app_data_dir() -> Path:

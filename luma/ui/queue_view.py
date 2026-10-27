@@ -39,7 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from luma.ui import icons
-from luma.ui.theme import COLORS, MOTION, RADIUS, SIZE, SPACE, STATUS_PILL
+from luma.ui.theme import COLORS, MOTION, RADIUS, SIZE, SPACE, STATUS_PILL, TYPE
 
 STATUS_TEXT = {
     "queued": "В очереди",
@@ -51,6 +51,19 @@ STATUS_TEXT = {
     "error": "Ошибка",
     "cancelled": "Отменено",
 }
+
+
+def plural_tracks(count: int) -> str:
+    """Склонение: 1 трек, 2 трека, 5 треков."""
+    tail = count % 100
+    if 11 <= tail <= 14:
+        return f"{count} треков"
+    last = count % 10
+    if last == 1:
+        return f"{count} трек"
+    if 2 <= last <= 4:
+        return f"{count} трека"
+    return f"{count} треков"
 
 
 def format_duration(seconds: float | None) -> str:
@@ -141,6 +154,7 @@ class TrackState:
     detail: str = ""
     size_text: str = ""
     thumbnail: str = ""
+    quality: dict = field(default_factory=dict)
 
 
 class TrackCard(QFrame):
@@ -204,6 +218,13 @@ class TrackCard(QFrame):
         self.numbers_box.setLayout(numbers)
         self.numbers_box.setVisible(False)
         row.addWidget(self.numbers_box, 0, Qt.AlignVCenter)
+
+        # Реальное качество источника: «MP3 320», «Opus 130», «WAV»
+        self.quality_badge = QLabel(objectName="QualityBadge")
+        self.quality_badge.setFixedHeight(22)
+        self.quality_badge.setAlignment(Qt.AlignCenter)
+        self.quality_badge.setVisible(False)
+        row.addWidget(self.quality_badge, 0, Qt.AlignVCenter)
 
         # Индикатор статуса: кружок и подпись — отдельные элементы,
         # иначе символ «точки» встаёт по базовой линии шрифта и выглядит
@@ -270,6 +291,21 @@ class TrackCard(QFrame):
             f"border-radius: 11px; }}"
         )
         self.status_pill.setToolTip(state.detail if state.status == "error" else "")
+
+        quality = state.quality or {}
+        show_quality = state.status in ("done", "no_cover") and bool(quality.get("label"))
+        self.quality_badge.setVisible(show_quality)
+        if show_quality:
+            good = quality.get("good")
+            q_color = COLORS["success"] if good else COLORS["text_muted"]
+            q_border = COLORS["success_dim"] if good else COLORS["divider"]
+            self.quality_badge.setText(quality["label"])
+            self.quality_badge.setToolTip(quality.get("tooltip", ""))
+            self.quality_badge.setStyleSheet(
+                f"QLabel#QualityBadge {{ color: {q_color}; background: transparent; "
+                f"border: 1px solid {q_border}; border-radius: 6px; "
+                f"padding: 0 8px; font-size: {TYPE['caption']}px; font-weight: 600; }}"
+            )
 
         active = state.status in ("downloading", "converting")
         self.setProperty("active", "yes" if active else "")
@@ -528,7 +564,8 @@ class QueueView(QScrollArea):
             previous = card.state
             # Не затираем уже известные данные пустыми значениями
             for field_name in (
-                "title", "artist", "source", "duration", "url", "filepath", "thumbnail"
+                "title", "artist", "source", "duration", "url", "filepath", "thumbnail",
+                "quality",
             ):
                 value = getattr(state, field_name)
                 if value:

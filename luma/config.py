@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Luma"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 
 def app_data_dir() -> Path:
@@ -108,6 +108,36 @@ class Settings:
     @skip_downloaded.setter
     def skip_downloaded(self, value: bool) -> None:
         self._data["skip_downloaded"] = bool(value)
+        self.save()
+
+    @property
+    def clean_titles(self) -> bool:
+        """Убирать из названий [FREE DL], OUT NOW, Premiere и т.п."""
+        return bool(self._data.get("clean_titles", True))
+
+    @clean_titles.setter
+    def clean_titles(self, value: bool) -> None:
+        self._data["clean_titles"] = bool(value)
+        self.save()
+
+    @property
+    def strip_catalog(self) -> bool:
+        """Убирать каталожные номера вида [IHT016]."""
+        return bool(self._data.get("strip_catalog", True))
+
+    @strip_catalog.setter
+    def strip_catalog(self, value: bool) -> None:
+        self._data["strip_catalog"] = bool(value)
+        self.save()
+
+    @property
+    def force_320(self) -> bool:
+        """Перекодировать MP3-источники ниже 320 kbps в MP3 320."""
+        return bool(self._data.get("force_320", False))
+
+    @force_320.setter
+    def force_320(self, value: bool) -> None:
+        self._data["force_320"] = bool(value)
         self.save()
 
 

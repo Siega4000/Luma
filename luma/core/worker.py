@@ -38,6 +38,9 @@ class DownloadWorker(QThread):
         bitrate: str,
         archive_path: Path | None = None,
         force: bool = False,
+        clean_titles: bool = True,
+        strip_catalog: bool = True,
+        force_320: bool = False,
     ) -> None:
         super().__init__()
         self._urls = urls
@@ -51,6 +54,9 @@ class DownloadWorker(QThread):
             on_resolved=self._emit_resolved,
             archive_path=archive_path,
             force=force,
+            clean_titles=clean_titles,
+            strip_catalog=strip_catalog,
+            force_320=force_320,
         )
 
     # ------------------------------------------------------------------ API
@@ -119,9 +125,7 @@ class DownloadWorker(QThread):
         """Ссылка распознана — сообщаем о переходе к загрузке."""
         self.content_resolved.emit(data)
         count = len(data.get("entries") or [])
-        self.status_changed.emit(
-            f"Загрузка · {count} трек(ов)" if count else "Загрузка"
-        )
+        self.status_changed.emit(f"Загрузка · {count}" if count else "Загрузка")
 
     def _emit_progress(self, data: dict) -> None:
         self.track_progress.emit(
@@ -143,5 +147,6 @@ class DownloadWorker(QThread):
                 "artist": track.artist,
                 "source": track.source,
                 "thumbnail": track.thumbnail,
+                "quality": track.quality or {},
             }
         )

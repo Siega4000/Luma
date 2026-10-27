@@ -4,7 +4,9 @@
 Отвечает за:
   * скачивание аудио из публичных источников (YouTube, SoundCloud, Bandcamp);
   * конвертацию в MP3 через ffmpeg;
+  * чистку названий от промо-пометок (см. names.py);
   * запись базовых ID3-тегов (title/artist) через ffmpeg-metadata;
+  * определение реального качества источника (см. quality.py);
   * встраивание обложек через mutagen (см. tagger.py);
   * структуру хранения: треки — в корень библиотеки,
     плейлисты — в подпапку с названием плейлиста;
@@ -21,10 +23,12 @@ from pathlib import Path
 from typing import Callable
 
 import yt_dlp
-from yt_dlp.postprocessor import PostProcessor
+from mutagen.mp3 import MP3
+from yt_dlp.postprocessor import FFmpegExtractAudioPP, FFmpegMetadataPP, PostProcessor
 from yt_dlp.utils import DownloadCancelled, DownloadError, sanitize_filename
 
-from luma.core import tagger
+from luma.core import quality, tagger
+from luma.core.names import clean_title
 from luma.utils.ffmpeg_locator import find_ffmpeg
 
 log = logging.getLogger("luma.downloader")
@@ -45,6 +49,7 @@ class TrackResult:
     artist: str = ""
     source: str = ""
     thumbnail: str = ""
+    quality: dict | None = None
     error: str | None = None
 
     @property
@@ -60,7 +65,7 @@ class UrlResult:
     error: str | None = None
 
 
-def _meta(info: dict) -> dict:
+def _meta(info: dict, cleaner: Callable[[dict], str] | None = None) -> dict:
     """Единый разбор метаданных трека из info_dict yt-dlp."""
     thumbnails = info.get("thumbnails") or []
     thumbnail = info.get("thumbnail") or ""
@@ -69,13 +74,117 @@ def _meta(info: dict) -> dict:
         thumbnail = (thumbnails[len(thumbnails) // 2] or {}).get("url", "")
     return {
         "id": str(info.get("id") or ""),
-        "title": info.get("title") or "Без названия",
+        "title": (cleaner(info) if cleaner else info.get("title")) or "Без названия",
         "artist": info.get("artist") or info.get("uploader") or info.get("creator") or "",
         "duration": info.get("duration"),
         "url": info.get("webpage_url") or info.get("original_url") or "",
         "source": info.get("extractor_key") or info.get("extractor") or "",
         "thumbnail": thumbnail,
     }
+
+
+def _artist_of(info: dict) -> str | None:
+    """
+    Исполнитель из метаданных площадки.
+
+    Bandcamp и SoundCloud отдают его отдельным полем. Если поля нет,
+    на SoundCloud берётся ник загрузившего — обычно это сам артист.
+    Ник YouTube-канала не используется: там часто грузит лейбл.
+    """
+    artists = info.get("artists")
+    if isinstance(artists, list) and artists and isinstance(artists[0], str):
+        return artists[0]
+    for key in ("artist", "creator"):
+        if isinstance(info.get(key), str) and info[key]:
+            return info[key]
+    extractor = (info.get("extractor_key") or info.get("extractor") or "").lower()
+    if "soundcloud" in extractor and isinstance(info.get("uploader"), str):
+        return info["uploader"]
+    return None
+
+
+class _TitleCleanPP(PostProcessor):
+    """
+    Чистит название до загрузки: yt-dlp строит имя файла и ID3-тег title
+    уже из исправленного значения, поэтому переименовывать ничего не нужно.
+    """
+
+    def __init__(self, engine: "DownloadEngine") -> None:
+        super().__init__()
+        self._engine = engine
+
+    def run(self, info):  # noqa: D102 (интерфейс yt-dlp)
+        title = self._engine._clean(info)
+        bare = self._engine._clean({"title": info.get("title")})  # без подстановки артиста
+        # «track» — чистое название без исполнителя (YouTube Music и т.п.);
+        # из него FFmpegMetadata пишет ID3-тег «Название».
+        if isinstance(info.get("track"), str) and info["track"]:
+            info["track"] = self._engine._clean({"title": info["track"]})
+        elif title and bare and title != bare:
+            # Исполнитель подставлен только в имя файла,
+            # в теге название остаётся без него: артист живёт в своём поле.
+            info["track"] = bare
+        if title:
+            info["title"] = info["fulltitle"] = title
+        return [], info
+
+
+class _ExtractAudioPP(FFmpegExtractAudioPP):
+    """
+    Конвертация в MP3, которая запоминает, что было на входе.
+
+    Обычный FFmpegExtractAudio копирует MP3-источник без изменений —
+    это лучший вариант, качество не теряется. С флагом force MP3 ниже
+    320 kbps перекодируется: файл станет 320, но звук останется
+    на уровне источника. MP3 320 не перекодируется никогда.
+    """
+
+    def __init__(self, downloader, bitrate: str, force: bool) -> None:
+        super().__init__(downloader, preferredcodec="mp3", preferredquality=bitrate)
+        self._force = force
+        self._probe: dict = {}
+
+    def get_audio_codec(self, path):  # noqa: D102 (интерфейс yt-dlp)
+        codec = super().get_audio_codec(path)
+        self._probe = {"codec": codec, "forced": False}
+        if codec == "mp3":
+            # Битрейт источника меряем до возможного перекодирования
+            self._probe["kbps"] = _mp3_kbps(Path(path)) or None
+        if self._force and codec == "mp3" and (self._probe.get("kbps") or 0) < 320:
+            self._probe["forced"] = True
+            return "mp3-reencode"  # ведёт в ветку перекодирования
+        return codec
+
+    def run(self, information):  # noqa: D102 (интерфейс yt-dlp)
+        source_ext = information.get("ext")
+        self._probe = {}
+        files, information = super().run(information)
+        codec = self._probe.get("codec")
+        information["_luma_source"] = {
+            "codec": codec,
+            "ext": source_ext,
+            "kbps": self._probe.get("kbps") or information.get("abr"),
+            "transcoded": codec != "mp3" or self._probe.get("forced", False),
+        }
+        return files, information
+
+
+_STANDARD_KBPS = (32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320)
+
+
+def _mp3_kbps(path: Path) -> int:
+    """
+    Битрейт MP3-файла в kbps (0, если файл не читается).
+
+    mutagen считает средний битрейт и для CBR выдаёт 319 вместо 320,
+    поэтому близкие значения приводятся к стандартной ступени.
+    """
+    try:
+        raw = MP3(str(path)).info.bitrate / 1000
+    except Exception:
+        return 0
+    nearest = min(_STANDARD_KBPS, key=lambda k: abs(k - raw))
+    return nearest if abs(nearest - raw) <= 3 else round(raw)
 
 
 class _ThumbnailFilterPP(PostProcessor):
@@ -113,6 +222,16 @@ class _CoverEmbedPP(PostProcessor):
         if filepath:
             embedded = tagger.process_track(Path(filepath), info)
         data = _meta(info)
+        track_quality = None
+        source = info.get("_luma_source")
+        if filepath and source:
+            track_quality = quality.describe(
+                file_kbps=_mp3_kbps(Path(filepath)) or None,
+                source_codec=source.get("codec"),
+                source_ext=source.get("ext"),
+                source_kbps=source.get("kbps"),
+                transcoded=source.get("transcoded", True),
+            )
         self._engine._register_track(
             TrackResult(
                 track_id=data["id"],
@@ -124,6 +243,7 @@ class _CoverEmbedPP(PostProcessor):
                 artist=data["artist"],
                 source=data["source"],
                 thumbnail=data["thumbnail"],
+                quality=track_quality,
             )
         )
         return [], info
@@ -143,11 +263,17 @@ class DownloadEngine:
         on_resolved: Callable[[dict], None] | None = None,
         archive_path: Path | None = None,
         force: bool = False,
+        clean_titles: bool = True,
+        strip_catalog: bool = True,
+        force_320: bool = False,
     ) -> None:
         self.output_dir = Path(output_dir)
         self.bitrate = bitrate
         self.archive_path = archive_path
         self.force = force
+        self.clean_titles = clean_titles
+        self.strip_catalog = strip_catalog
+        self.force_320 = force_320
         self._on_progress = on_progress or (lambda _: None)
         self._on_log = on_log or (lambda *_: None)
         self._on_track = on_track or (lambda _: None)
@@ -209,7 +335,14 @@ class DownloadEngine:
 
         try:
             with yt_dlp.YoutubeDL(self._build_options(target_dir)) as ydl:
+                if self.clean_titles:
+                    ydl.add_post_processor(_TitleCleanPP(self), when="pre_process")
                 ydl.add_post_processor(_ThumbnailFilterPP(), when="pre_process")
+                # Порядок важен: MP3 → теги → обложка
+                ydl.add_post_processor(
+                    _ExtractAudioPP(ydl, self.bitrate, self.force_320), when="post_process"
+                )
+                ydl.add_post_processor(FFmpegMetadataPP(ydl), when="post_process")
                 ydl.add_post_processor(_CoverEmbedPP(self), when="post_process")
                 ydl.download([url])
         except DownloadCancelled:
@@ -226,6 +359,12 @@ class DownloadEngine:
         return result
 
     # ------------------------------------------------------------- internals
+
+    def _clean(self, info: dict) -> str:
+        title = info.get("title") or ""
+        if not self.clean_titles or not title:
+            return title
+        return clean_title(title, strip_catalog=self.strip_catalog, artist=_artist_of(info))
 
     def _register_track(self, track: TrackResult) -> None:
         self._current_tracks.append(track)
@@ -251,11 +390,11 @@ class DownloadEngine:
         items: list[dict] = []
         if entries is not None:
             try:
-                items = [_meta(e) for e in entries if isinstance(e, dict)]
+                items = [_meta(e, self._clean) for e in entries if isinstance(e, dict)]
             except TypeError:
                 items = []
         else:
-            items = [_meta(info)]
+            items = [_meta(info, self._clean)]
 
         return {
             "is_playlist": is_playlist,
@@ -283,14 +422,7 @@ class DownloadEngine:
             "socket_timeout": 60,
             "source_address": "0.0.0.0",   # принудительный IPv4 (лечит WinError 10054)
             "progress_hooks": [self._progress_hook],
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": self.bitrate,
-                },
-                {"key": "FFmpegMetadata"},  # title/artist → ID3
-            ],
+            # Постпроцессоры (MP3, теги, обложка) добавляются в process_url
             "logger": _YdlLogger(self._on_log),
         }
         if self.archive_path is not None:
@@ -311,7 +443,7 @@ class DownloadEngine:
 
         if track_id and track_id not in self._started_ids:
             self._started_ids.add(track_id)
-            self._on_track_start(_meta(info))
+            self._on_track_start(_meta(info, self._clean))
 
         if d.get("status") == "downloading":
             total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0

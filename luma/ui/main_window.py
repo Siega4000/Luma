@@ -41,7 +41,7 @@ from luma.core.worker import DownloadWorker
 from luma.ui import icons
 from luma.ui.cover_fetch import CoverFetcher
 from luma.ui.dialogs import LogDialog, SettingsDialog
-from luma.ui.queue_view import QueueView, TrackState
+from luma.ui.queue_view import QueueView, TrackState, plural_tracks
 from luma.ui.assets import check_icon_path
 from luma.ui.theme import COLORS, SIZE, SPACE, build_stylesheet
 from luma.ui.title_bar import TitleBar
@@ -446,6 +446,9 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.settings.audio_bitrate,
             archive_path=archive_path,
             force=force,
+            clean_titles=self.settings.clean_titles,
+            strip_catalog=self.settings.strip_catalog,
+            force_320=self.settings.force_320,
         )
         worker.log_message.connect(self._append_log)
         worker.content_resolved.connect(self._on_content_resolved)
@@ -561,6 +564,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             url=data.get("url") or "",
             filepath=data.get("filepath") or "",
             status="done" if data.get("cover_embedded") else "no_cover",
+            quality=data.get("quality") or {},
         )
         card = self.queue.upsert(state)
         if state.filepath:
@@ -588,7 +592,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         # Пока идёт загрузка, в шапке виден ход процесса, а не размер очереди
         self.queue_counter.setText(
             self._progress_text if getattr(self, "_running", False)
-            else f"{total} в очереди"
+            else plural_tracks(total)
         )
         text = f"Загружено: {done} из {total}"
         if errors:
@@ -623,6 +627,9 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _on_thread_done(self) -> None:
         self._set_running(False)
         self.worker = None
+        # Очередь закончилась — в шапке снова её состав, а не ход загрузки
+        self._progress_text = ""
+        self.queue_counter.setText(plural_tracks(len(self.queue.states())))
 
     def _on_cover_ready(self, key: str, data: bytes) -> None:
         card = self.queue.card(key)

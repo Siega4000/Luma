@@ -48,7 +48,7 @@ class SettingsDialog(QDialog):
         self.settings = settings
         self.setWindowTitle("Настройки")
         self.setStyleSheet(build_stylesheet(check_icon_path()))
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(500)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -86,6 +86,49 @@ class SettingsDialog(QDialog):
         )
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        layout.addWidget(_divider())
+
+        # --- Названия и качество ---
+        self.clean_check = QCheckBox("Чистить названия треков")
+        self.clean_check.setChecked(settings.clean_titles)
+        layout.addWidget(self.clean_check)
+        layout.addWidget(self._hint(
+            "Убирает [FREE DL], OUT NOW, Premiere, (128 kbps), эмодзи и жанр в скобках, "
+            "добавляет исполнителя, если его нет. Версия трека — (Original Mix), "
+            "(Extended Mix), (X Remix) — остаётся."
+        ))
+
+        self.catalog_check = QCheckBox("Убирать каталожные номера вида [IHT016]")
+        self.catalog_check.setChecked(settings.strip_catalog)
+        self.catalog_check.toggled.connect(
+            lambda checked: setattr(self.settings, "strip_catalog", checked)
+        )
+        catalog_row = QHBoxLayout()
+        catalog_row.setContentsMargins(SPACE["xl"], 0, 0, 0)
+        catalog_row.addWidget(self.catalog_check)
+        layout.addLayout(catalog_row)
+
+        def on_clean(checked: bool) -> None:
+            self.settings.clean_titles = checked
+            self.catalog_check.setEnabled(checked)
+
+        self.clean_check.toggled.connect(on_clean)
+        self.catalog_check.setEnabled(settings.clean_titles)
+
+        self.force_check = QCheckBox("Всегда перекодировать в MP3 320")
+        self.force_check.setChecked(settings.force_320)
+        self.force_check.toggled.connect(
+            lambda checked: setattr(self.settings, "force_320", checked)
+        )
+        layout.addWidget(self.force_check)
+        layout.addWidget(self._hint(
+            "SoundCloud и Bandcamp отдают MP3 128 — по умолчанию он сохраняется "
+            "без изменений. С этой опцией файл станет 320 kbps и примерно в 2,5 раза "
+            "больше, но звучать будет так же, как источник."
+        ))
+
+        layout.addWidget(_divider())
 
         self.auto_update_check = QCheckBox("Обновлять движок загрузки автоматически")
         self.auto_update_check.setChecked(settings.auto_update_engine)
@@ -128,6 +171,21 @@ class SettingsDialog(QDialog):
         footer.addWidget(close)
         layout.addLayout(footer)
         close.setFocus()
+
+        # Подсказки переносятся по словам: высоту окна считаем
+        # по фиксированной ширине, иначе нижние строки обрезаются.
+        self.setFixedWidth(500)
+        layout.activate()
+        height = layout.heightForWidth(500)
+        if height > 0:
+            self.setMinimumHeight(height)
+            self.resize(500, height)
+
+    @staticmethod
+    def _hint(text: str) -> QLabel:
+        label = QLabel(text, objectName="FieldHint")
+        label.setWordWrap(True)
+        return label
 
     def _on_check_clicked(self) -> None:
         self.check_button.setEnabled(False)

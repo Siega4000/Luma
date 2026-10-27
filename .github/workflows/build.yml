@@ -13,6 +13,8 @@ jobs:
   build:
     runs-on: windows-latest
 
+    # Нужно, чтобы шаг создания релиза мог записывать в репозиторий:
+    # по умолчанию токен сборки работает только на чтение.
     permissions:
       contents: write
 
@@ -31,6 +33,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      - name: Проверить чистку названий
+        run: python tests/test_names.py
 
       - name: Скачать ffmpeg и зафиксировать версию
         run: |

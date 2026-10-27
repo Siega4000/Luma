@@ -35,6 +35,8 @@ jobs:
           pip install pyinstaller
 
       - name: Проверить чистку названий
+        env:
+          PYTHONUTF8: "1"
         run: python tests/test_names.py
 
       - name: Скачать ffmpeg и зафиксировать версию
